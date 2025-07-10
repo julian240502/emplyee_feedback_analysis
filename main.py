@@ -1,27 +1,14 @@
 import seaborn as sns
 import pandas as pd
 from transformers import pipeline
-import openai
 import streamlit as st
 import io
 import matplotlib.pyplot as plt
-import torch
-
+import ollama
 import re
+from ai_utils import sentiment_analysis, categories, summarize, generate_recommendation
 
 
-import os
-os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-st.write(f"Using device: {device}")
-
-api_key = "/TAQjyBklMetRPIWjUHbFV/SxelHKeWnbfqdZmxVF3A=" # key Julian
-api_url = "http://px101.prod.exalead.com:8110/v1"
-client = openai.OpenAI(api_key=api_key, base_url=api_url)
-
-sentiment_pipeline= pipeline('sentiment-analysis', model = 'cardiffnlp/twitter-roberta-base-sentiment-latest', device=device)
-classification_pipeline = pipeline('zero-shot-classification', model = 'knowledgator/comprehend_it-base', device=device)
 
 candidate_labels = [
     "3DS Product and customer focus",
@@ -41,68 +28,6 @@ candidate_labels = [
 ]
 
 
-def sentiment_analysis(comments, batch_size = 16):
-    comments = comments[0].dropna().astype(str).str.strip().tolist()  # filter for empty comments
-    comments = [c for c in comments if len(c) > 0]
-
-    comments_df = pd.DataFrame(comments, columns=['comments'])
-
-    results = []
-
-    for i in range(0, len(comments_df), batch_size):
-        batch = comments_df['comments'][i:i+batch_size].tolist()
-        sentiments = sentiment_pipeline(batch, truncation=True, max_length=512)
-        results.extend(sentiments)
-
-    comments_df['sentiments'] = [res['label'] for res in results]
-    return comments_df
-
-def categories(comments_df, candidate_labels, batch_size=16):
-    results = []
-    texts = comments_df["comments"].astype(str).tolist()
-
-    for i in range(0, len(texts), batch_size):
-        batch = texts[i:i + batch_size]
-        outputs = classification_pipeline(
-            batch,
-            candidate_labels=candidate_labels,
-            truncation=True
-        )
-        results.extend(outputs)
-
-    comments_df = comments_df.copy()
-    comments_df["Topic"] = [res["labels"][0] for res in results]
-    return comments_df
-
-def summarize(comments):
-    prompt = f"""
-You are a human resource expert.
-You receive the following employee feedbacks related to a specific HR topic:
-
-{ " ".join(comments) }
-
-Write a concise and actionable summary (4-6 lines max) of these comments, highlighting the key points or concerns.
-"""
-    response = client.chat.completions.create(
-        model="mistralai/Mistral-Small-24B-Instruct-2501",
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=500,
-        temperature=0
-    )
-    return response.choices[0].message.content
-    
-
-def generate_recommendation(summary):
-    prompt = f"There is a summary of employee feedbacks about {topic} : {summary}\n You are a Human ressource expert, your job is to give maximum 3 recommendations about the summary"
-    response = client.chat.completions.create(
-                model="mistralai/Mistral-Small-24B-Instruct-2501",
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=1500,
-                temperature=0
-            )
-    return response.choices[0].message.content
-
-
 # Streamlit app layout
 st.title("Employee Feedback Analysis")
 
@@ -114,10 +39,13 @@ if 'category_summaries' not in st.session_state:
 if 'already_displayed' not in st.session_state:
     st.session_state.already_displayed = False
 
-uploaded_file = st.file_uploader("Upload your Excel file", type=["xlsx"])
+uploaded_file = st.file_uploader("Upload your Excel or CSV file", type=["xlsx", "csv"])
 
 if uploaded_file is not None:
-    df = pd.read_excel(uploaded_file)
+    if uploaded_file.name.endswith('.csv'):
+        df = pd.read_csv(uploaded_file)
+    else:
+        df = pd.read_excel(uploaded_file)
 
     if df.empty:
         st.error("Uploaded file is empty.")
@@ -165,6 +93,8 @@ if uploaded_file is not None:
             ax1.set_title("Sentiment Distribution",fontsize=16)
 
             # Pie chart for category distribution
+            if not isinstance(topic_counts, pd.Series):
+                topic_counts = pd.Series(topic_counts)
             ax2.pie(topic_counts,
                     labels=topic_counts.index,
                     autopct='%1.1f%%', 
@@ -176,6 +106,7 @@ if uploaded_file is not None:
             plt.tight_layout()
             st.pyplot(fig)
 
+            # Utilisation de 'openpyxl' car compatible avec BytesIO pour pandas
             output_classification = io.BytesIO()
             with pd.ExcelWriter(output_classification, engine='openpyxl') as writer:
                 st.session_state.result_df.to_excel(writer, index=False)
@@ -226,6 +157,7 @@ if uploaded_file is not None:
                 st.write(f"**Recommendation**:\n {item['recommendation']}")
                 st.write("---")
 
+            # Utilisation de 'openpyxl' car compatible avec BytesIO pour pandas
             output_summaries = io.BytesIO()
             summary_df = pd.DataFrame(st.session_state.category_summaries)
             with pd.ExcelWriter(output_summaries, engine='openpyxl') as writer:
